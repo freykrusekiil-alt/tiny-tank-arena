@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tiny Tank Arena</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #f5f7fa;
+      color: #263445;
+      font-family: system-ui, sans-serif;
+    }
+    canvas { display: block; }
+    .panel {
+      position: fixed;
+      z-index: 2;
+      padding: 11px 14px;
+      background: #ffffffed;
+      border: 1px solid #dce3eb;
+      border-radius: 10px;
+      box-shadow: 0 3px 12px #20304018;
+      user-select: none;
+    }
+    #hud { top: 12px; left: 12px; line-height: 1.5; }
+    #buildHud { top: 12px; right: 12px; text-align: right; }
+    #help {
+      position: fixed;
+      z-index: 2;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 7px 12px;
+      border-radius: 8px;
+      background: #ffffffdd;
+      color: #607080;
+      font-size: 12px;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .overlay {
+      position: fixed;
+      z-index: 5;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #152333bb;
+    }
+    .card {
+      width: min(590px, calc(100vw - 28px));
+      max-height: 90vh;
+      overflow: auto;
+      padding: 24px;
+      border-radius: 16px;
+      background: white;
+      box-shadow: 0 10px 50px #0005;
+    }
+    .card h1 { margin: 0 0 6px; }
+    .card p { color: #607080; }
+    #buildChoices {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 16px 0;
+    }
+    .buildChoice {
+      padding: 11px;
+      border: 2px solid #dce3eb;
+      border-radius: 9px;
+      background: #fff;
+      color: #263445;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+    }
+    .buildChoice.selected {
+      border-color: #4285c5;
+      background: #eef6ff;
+    }
+    .buildChoice strong { display: block; margin-bottom: 3px; }
+    .buildChoice small { color: #607080; }
+    .primaryButton {
+      width: 100%;
+      padding: 11px;
+      border: 0;
+      border-radius: 8px;
+      background: #4285c5;
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .primaryButton:disabled { opacity: .5; cursor: default; }
+    #gameOver { display: none; }
+    #minimap {
+      position: fixed;
+      z-index: 2;
+      right: 14px;
+      bottom: 14px;
+      width: 190px;
+      height: 145px;
+      border: 2px solid #b9c5d1;
+      border-radius: 5px;
+      background: #ffffffed;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud" class="panel"></div>
+  <div id="buildHud" class="panel"></div>
+  <canvas id="minimap" width="380" height="290"></canvas>
+  <div id="help">WASD / arrows: move · Mouse: aim · Click / Space: fire</div>
+
+  <div id="startScreen" class="overlay">
+    <div class="card">
+      <h1>Tiny Tank Arena</h1>
+      <p>Choose your tank before the match. Your build is locked until you start a new game.</p>
+      <div id="buildChoices"></div>
+      <button id="startButton" class="primaryButton">Start match</button>
+    </div>
+  </div>
+
+  <div id="gameOver" class="overlay">
+    <div class="card" style="text-align:center">
+      <h1>Tank destroyed!</h1>
+      <p id="finalScore"></p>
+      <button id="restartButton" class="primaryButton">Choose a build and play again</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const mapCanvas = document.querySelector("#minimap");
+    const mapCtx = mapCanvas.getContext("2d");
+    const hud = document.querySelector("#hud");
+    const buildHud = document.querySelector("#buildHud");
+    const startScreen = document.querySelector("#startScreen");
+    const gameOver = document.querySelector("#gameOver");
+    const startButton = document.querySelector("#startButton");
+
+    const arena = { width: 12000, height: 9000 };
+    const keys = new Set();
+    const mouse = { x: innerWidth / 2, y: innerHeight / 2, down: false };
+    const bullets = [];
+    const shapes = [];
+    const bots = [];
+    const minions = [];
+
+    let width, height, running = false, chosenBuild = "sniper";
+
+    function resize() {
+      width = canvas.width = innerWidth;
+      height = canvas.height = innerHeight;
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    const builds = {
+      sniper: {
+        name: "Sniper", color: "#4285c5",
+        description: "Very long range and powerful shots; slow reload.",
+        speed: 235, health: 115, radius: 19, reload: 0.82,
+        damage: 27, bulletSpeed: 1050, bulletSize: 8, bulletLife: 2.1
+      },
+      machine: {
+        name: "Machine Gunner", color: "#4285c5",
+        description: "Very fast fire rate; lighter bullets.",
+        speed: 255, health: 120, radius: 19, reload: 0.105,
+        damage: 5.4, bulletSpeed: 750, bulletSize: 5, bulletLife: 1.35
+      },
+      commander: {
+        name: "Minion Commander", color: "#4285c5",
+        description: "Two useful minions follow you and attack enemy tanks.",
+        speed: 230, health: 125, radius: 19, reload: 0.35,
+        damage: 9, bulletSpeed: 720, bulletSize: 6, bulletLife: 1.5
+      },
+      body: {
+        name: "Body Damage", color: "#4285c5",
+        description: "More health and strong ramming damage on contact.",
+        speed: 255, health: 185, radius: 23, reload: 0.31,
+        damage: 8, bulletSpeed: 680, bulletSize: 6, bulletLife: 1.35
+      },
+      twin: {
+        name: "Twin", color: "#4285c5",
+        description: "Fires two bullets together for reliable close-range damage.",
+        speed: 250, health: 125, radius: 19, reload: 0.26,
+        damage: 7.2, bulletSpeed: 720, bulletSize: 5, bulletLife: 1.35
+      },
+      flank: {
+        name: "Flank Guard", color: "#4285c5",
+        description: "Fires forward and behind, so enemies cannot sneak up easily.",
+        speed: 245, health: 135, radius: 20, reload: 0.31,
+        damage: 8.5, bulletSpeed: 690, bulletSize: 6, bulletLife: 1.4
+      },
+      destroyer: {
+        name: "Destroyer", color: "#4285c5",
+        description: "Heavy, hard-hitting cannon with a long reload.",
+        speed: 225, health: 145, radius: 21, reload: 0.67,
+        damage: 23, bulletSpeed: 760, bulletSize: 9, bulletLife: 1.55
+      },
+      ranger: {
+        name: "Ranger", color: "#4285c5",
+        description: "Long-range shots with a quicker reload than Sniper.",
+        speed: 245, health: 120, radius: 19, reload: 0.43,
+        damage: 12, bulletSpeed: 900, bulletSize: 6, bulletLife: 1.8
+      }
+    };
+
+    const player = {
+      id: "player",
+      x: arena.width / 2, y: arena.height / 2,
+      radius: 19, angle: 0, health: 120, maxHealth: 120,
+      speed: 245, score: 0, level: 1, xp: 0, nextXp: 12,
+      fireCooldown: 0, build: null, alive: true,
+      bodyCooldown: 0
+    };
+
+    function makeBuildChoices() {
+      const holder = document.querySelector("#buildChoices");
+      holder.innerHTML = "";
+      for (const [key, build] of Object.entries(builds)) {
+        const button = document.createElement("button");
+        button.className = "buildChoice" + (key === chosenBuild ? " selected" : "");
+        button.innerHTML = `<strong>${build.name}</strong><small>${build.description}</small>`;
+        button.addEventListener("click", () => {
+          chosenBuild = key;
+          holder.querySelectorAll(".buildChoice").forEach(b => b.classList.remove("selected"));
+          button.classList.add("selected");
+        });
+        holder.appendChild(button);
+      }
+    }
+    makeBuildChoices();
+
+    addEventListener("keydown", e => {
+      keys.add(e.key.toLowerCase());
+      if (e.code === "Space") e.preventDefault();
+    });
+    addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+    addEventListener("mousemove", e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+    addEventListener("mousedown", () => mouse.down = true);
+    addEventListener("mouseup", () => mouse.down = false);
+
+    function randomPoint() {
+      return {
+        x: 120 + Math.random() * (arena.width - 240),
+        y: 120 + Math.random() * (arena.height - 240)
+      };
+    }
+
+    function randomShape() {
+      const roll = Math.random();
+      const type = roll < 0.72 ? "square" : roll < 0.92 ? "triangle" : "pentagon";
+      const size = type === "square" ? 21 : type === "triangle" ? 26 : 34;
+      const hp = type === "square" ? 3 : type === "triangle" ? 5 : 10;
+      return { ...randomPoint(), type, size, hp, maxHp: hp,
+        angle: Math.random() * Math.PI * 2,
+        spin: (Math.random() - 0.5) * 0.8 };
+    }
+
+    function makeBot(index) {
+      let p = randomPoint();
+      let tries = 0;
+      while (Math.hypot(p.x - player.x, p.y - player.y) < 1200 && tries++ < 15) {
+        p = randomPoint();
+      }
+      return {
+        id: `bot-${index}-${Math.random()}`,
+        ...p, radius: 19, angle: Math.random() * Math.PI * 2,
+        health: 105, maxHealth: 105, speed: 125 + Math.random() * 25,
+        fireCooldown: Math.random(), alive: true,
+        color: ["#e84b4b", "#d93659", "#ee6a45"][index % 3],
+        contactCooldown: 0
+      };
+    }
+
+    function populateWorld() {
+      shapes.length = 0;
+      bots.length = 0;
+      for (let i = 0; i < 300; i++) shapes.push(randomShape());
+      for (let i = 0; i < 36; i++) bots.push(makeBot(i));
+    }
+
+    function startMatch() {
+      const build = builds[chosenBuild];
+      player.build = chosenBuild;
+      player.speed = build.speed;
+      player.radius = build.radius;
+      player.maxHealth = build.health;
+      player.health = build.health;
+      player.x = arena.width / 2;
+      player.y = arena.height / 2;
+      player.score = 0;
+      player.level = 1;
+      player.xp = 0;
+      player.nextXp = 12;
+      player.fireCooldown = 0;
+      player.bodyCooldown = 0;
+      player.alive = true;
+      bullets.length = 0;
+      minions.length = 0;
+
+      if (chosenBuild === "commander") {
+        for (let i = 0; i < 2; i++) {
+          minions.push({
+            id: `minion-${i}`, x: player.x + (i ? 50 : -50),
+            y: player.y + 45, radius: 12, angle: 0,
+            fireCooldown: Math.random() * 0.4
+          });
+        }
+      }
+
+      populateWorld();
+      running = true;
+      startScreen.style.display = "none";
+      gameOver.style.display = "none";
+    }
+
+    startButton.addEventListener("click", startMatch);
+    document.querySelector("#restartButton").addEventListener("click", () => {
+      gameOver.style.display = "none";
+      startScreen.style.display = "flex";
+      running = false;
+      makeBuildChoices();
+    });
+
+    function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+    function nearestBot(entity) {
+      let target = null, best = Infinity;
+      for (const bot of bots) {
+        if (!bot.alive || bot === entity) continue;
+        const d = dist(entity, bot);
+        if (d < best) { best = d; target = bot; }
+      }
+      if (entity !== player && player.alive) {
+        const d = dist(entity, player);
+        if (d < best) target = player;
+      }
+      return target;
+    }
+
+    function addBullet(owner, angle, settings, faction) {
+      const start = owner.radius + 12;
+      bullets.push({
+        x: owner.x + Math.cos(angle) * start,
+        y: owner.y + Math.sin(angle) * start,
+        vx: Math.cos(angle) * settings.speed,
+        vy: Math.sin(angle) * settings.speed,
+        radius: settings.size, damage: settings.damage,
+        life: settings.life, ownerId: owner.id, faction
+      });
+    }
+
+    function shootPlayer() {
+      const build = builds[player.build];
+      const aim = Math.atan2(mouse.y - height / 2, mouse.x - width / 2);
+      player.angle = aim;
+      const settings = {
+        speed: build.bulletSpeed, size: build.bulletSize,
+        damage: build.damage, life: build.bulletLife
+      };
+
+      if (player.build === "twin") {
+        addBullet(player, aim - 0.09, settings, "player");
+        addBullet(player, aim + 0.09, settings, "player");
+      } else if (player.build === "flank") {
+        addBullet(player, aim, settings, "player");
+        addBullet(player, aim + Math.PI, { ...settings, damage: build.damage * 0.8 }, "player");
+      } else {
+        addBullet(player, aim, settings, "player");
+      }
+    }
+
+    function updatePlayer(dt) {
+      let dx = 0, dy = 0;
+      if (keys.has("w") || keys.has("arrowup")) dy--;
+      if (keys.has("s") || keys.has("arrowdown")) dy++;
+      if (keys.has("a") || keys.has("arrowleft")) dx--;
+      if (keys.has("d") || keys.has("arrowright")) dx++;
+      const length = Math.hypot(dx, dy) || 1;
+      player.x += dx / length * player.speed * dt;
+      player.y += dy / length * player.speed * dt;
+      player.x = Math.max(player.radius, Math.min(arena.width - player.radius, player.x));
+      player.y = Math.max(player.radius, Math.min(arena.height - player.radius, player.y));
+      player.angle = Math.atan2(mouse.y - height / 2, mouse.x - width / 2);
+      player.fireCooldown -= dt;
+      player.bodyCooldown -= dt;
+      if ((mouse.down || keys.has(" ")) && player.fireCooldown <= 0) {
+        shootPlayer();
+        player.fireCooldown = builds[player.build].reload;
+      }
+    }
+
+    function updateBots(dt) {
+      for (const bot of bots) {
+        if (!bot.alive) continue;
+        bot.fireCooldown -= dt;
+        bot.contactCooldown -= dt;
+        const target = nearestBot(bot);
+        if (!target) continue;
+
+        const d = dist(bot, target);
+        const angle = Math.atan2(target.y - bot.y, target.x - bot.x);
+        bot.angle = angle;
+
+        if (d > 320) {
+          bot.x += Math.cos(angle) * bot.speed * dt;
+          bot.y += Math.sin(angle) * bot.speed * dt;
+        } else if (d < 175) {
+          bot.x -= Math.cos(angle) * bot.speed * 0.65 * dt;
+          bot.y -= Math.sin(angle) * bot.speed * 0.65 * dt;
+        }
+        bot.x = Math.max(bot.radius, Math.min(arena.width - bot.radius, bot.x));
+        bot.y = Math.max(bot.radius, Math.min(arena.height - bot.radius, bot.y));
+
+        if (d < 760 && bot.fireCooldown <= 0) {
+          addBullet(bot, angle, {
+            speed: 510, size: 6, damage: 9, life: 1.65
+          }, "enemy");
+          bot.fireCooldown = 0.9 + Math.random() * 0.3;
+        }
+      }
+    }
+
+    function updateMinions(dt) {
+      for (let i = 0; i < minions.length; i++) {
+        const minion = minions[i];
+        const orbit = i === 0 ? -0.75 : 0.75;
+        const followAngle = Math.atan2(minion.y - player.y, minion.x - player.x);
+        const targetX = player.x + Math.cos(followAngle + orbit) * 75;
+        const targetY = player.y + Math.sin(followAngle + orbit) * 75;
+        const dx = targetX - minion.x, dy = targetY - minion.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 12) {
+          minion.x += dx / d * Math.min(d, 230 * dt);
+          minion.y += dy / d * Math.min(d, 230 * dt);
+        }
+
+        const target = nearestBot(minion);
+        minion.fireCooldown -= dt;
+        if (target) {
+          const aim = Math.atan2(target.y - minion.y, target.x - minion.x);
+          minion.angle = aim;
+          if (dist(minion, target) < 600 && minion.fireCooldown <= 0) {
+            addBullet(minion, aim, {
+              speed: 650, size: 5, damage: 11, life: 1.5
+            }, "player");
+            minion.fireCooldown = 0.68;
+          }
+        }
+      }
+    }
+
+    function giveXp(amount) {
+      player.score += amount * 10;
+      player.xp += amount;
+      if (player.xp >= player.nextXp) {
+        player.xp -= player.nextXp;
+        player.level++;
+        player.nextXp = Math.round(player.nextXp * 1.35);
+        player.maxHealth += 6;
+        player.health = Math.min(player.maxHealth, player.health + 20);
+      }
+    }
+
+    function endMatch() {
+      if (!player.alive) return;
+      player.alive = false;
+      running = false;
+      document.querySelector("#finalScore").textContent =
+        `Score: ${player.score} · Level: ${player.level} · Build: ${builds[player.build].name}`;
+      gameOver.style.display = "flex";
+    }
+
+    function hitTarget(target, damage, bullet) {
+      target.health -= damage;
+      if (target === player && target.health <= 0) {
+        target.health = 0;
+        endMatch();
+      } else if (target !== player && target.health <= 0 && target.alive) {
+        target.health = 0;
+        target.alive = false;
+        if (bullet.faction === "player") giveXp(4);
+        const index = bots.indexOf(target);
+        setTimeout(() => {
+          if (running && index >= 0) bots[index] = makeBot(index);
+        }, 3500);
+      }
+    }
+
+    function updateBullets(dt) {
+      for (const bullet of bullets) {
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        bullet.life -= dt;
+
+        for (const shape of shapes) {
+          if (shape.hp <= 0) continue;
+          if (Math.hypot(shape.x - bullet.x, shape.y - bullet.y) < shape.size + bullet.radius) {
+            shape.hp -= bullet.damage;
+            bullet.life = 0;
+            if (shape.hp <= 0 && bullet.faction === "player") giveXp(shape.maxHp);
+            break;
+          }
+        }
+        if (bullet.life <= 0) continue;
+
+        if (bullet.faction === "enemy" && player.alive &&
+            bullet.ownerId !== player.id &&
+            Math.hypot(player.x - bullet.x, player.y - bullet.y) < player.radius + bullet.radius) {
+          hitTarget(player, bullet.damage, bullet);
+          bullet.life = 0;
+          continue;
+        }
+        if (bullet.faction === "player") {
+          for (const bot of bots) {
+            if (!bot.alive) continue;
+            if (Math.hypot(bot.x - bullet.x, bot.y - bullet.y) < bot.radius + bullet.radius) {
+              hitTarget(bot, bullet.damage, bullet);
+              bullet.life = 0;
+              break;
+            }
+          }
+        } else {
+          for (const bot of bots) {
+            if (!bot.alive || bot.id === bullet.ownerId) continue;
+            if (Math.hypot(bot.x - bullet.x, bot.y - bullet.y) < bot.radius + bullet.radius) {
+              hitTarget(bot, bullet.damage, bullet);
+              bullet.life = 0;
+              break;
+            }
+          }
+        }
+      }
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        if (bullets[i].life <= 0) bullets.splice(i, 1);
+      }
+    }
+
+    function updateBodyCollisions(dt) {
+      if (player.build !== "body") return;
+      for (const bot of bots) {
+        if (!bot.alive || dist(player, bot) >= player.radius + bot.radius) continue;
+        const angle = Math.atan2(bot.y - player.y, bot.x - player.x);
+        bot.x += Math.cos(angle) * 12;
+        bot.y += Math.sin(angle) * 12;
+        if (player.bodyCooldown <= 0) {
+          hitTarget(bot, 27, { faction: "player" });
+          player.health -= 5;
+          player.bodyCooldown = 0.48;
+          if (player.health <= 0) endMatch();
+        }
+      }
+    }
+
+    function update(dt) {
+      if (!running || !player.alive) return;
+      updatePlayer(dt);
+      updateBots(dt);
+      updateMinions(dt);
+      updateBullets(dt);
+      updateBodyCollisions(dt);
+
+      for (const shape of shapes) shape.angle += shape.spin * dt;
+      for (let i = shapes.length - 1; i >= 0; i--) {
+        if (shapes[i].hp <= 0) shapes.splice(i, 1);
+      }
+      while (shapes.length < 300) shapes.push(randomShape());
+
+      hud.innerHTML =
+        `<strong>Tiny Tank Arena</strong><br>` +
+        `Level: ${player.level} · Score: ${player.score}<br>` +
+        `XP: ${player.xp} / ${player.nextXp}<br>` +
+        `Health: ${Math.ceil(player.health)} / ${player.maxHealth}<br>` +
+        `Enemies alive: ${bots.filter(b => b.alive).length}`;
+      buildHud.innerHTML = `<strong>${builds[player.build].name}</strong><br>Build locked`;
+    }
+
+    function polygon(sides, radius, rotation) {
+      ctx.beginPath();
+      for (let i = 0; i < sides; i++) {
+        const a = rotation + i * Math.PI * 2 / sides;
+        if (i === 0) ctx.moveTo(Math.cos(a) * radius, Math.sin(a) * radius);
+        else ctx.lineTo(Math.cos(a) * radius, Math.sin(a) * radius);
+      }
+      ctx.closePath();
+    }
+
+    function drawTank(x, y, radius, angle, color) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.fillStyle = "#647b91";
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 3;
+      ctx.fillRect(0, -7, radius + 17, 14);
+      ctx.strokeRect(0, -7, radius + 17, 14);
+      ctx.restore();
+
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+    }
+
+    function drawMinimap() {
+      const w = mapCanvas.width, h = mapCanvas.height;
+      mapCtx.clearRect(0, 0, w, h);
+      mapCtx.fillStyle = "#f3f6f8";
+      mapCtx.fillRect(0, 0, w, h);
+      const px = x => x / arena.width * w;
+      const py = y => y / arena.height * h;
+
+      mapCtx.fillStyle = "#d5dce3";
+      for (const shape of shapes) mapCtx.fillRect(px(shape.x), py(shape.y), 2, 2);
+
+      for (const bot of bots) {
+        if (!bot.alive) continue;
+        mapCtx.fillStyle = "#e34242";
+        mapCtx.beginPath();
+        mapCtx.arc(px(bot.x), py(bot.y), 4, 0, Math.PI * 2);
+        mapCtx.fill();
+      }
+      for (const minion of minions) {
+        mapCtx.fillStyle = "#21a5b8";
+        mapCtx.beginPath();
+        mapCtx.arc(px(minion.x), py(minion.y), 4, 0, Math.PI * 2);
+        mapCtx.fill();
+      }
+      mapCtx.fillStyle = "#2676c5";
+      mapCtx.beginPath();
+      mapCtx.arc(px(player.x), py(player.y), 6, 0, Math.PI * 2);
+      mapCtx.fill();
+
+      mapCtx.fillStyle = "#536477";
+      mapCtx.font = "18px system-ui";
+      mapCtx.fillText("ARENA", 8, 22);
+    }
+
+    function draw() {
+      ctx.fillStyle = "#f5f7fa";
+      ctx.fillRect(0, 0, width, height);
+
+      const cameraX = player.x - width / 2;
+      const cameraY = player.y - height / 2;
+      const grid = 50;
+      ctx.strokeStyle = "#e7ebf0";
+      ctx.lineWidth = 1;
+      const startX = -((cameraX % grid) + grid) % grid;
+      const startY = -((cameraY % grid) + grid) % grid;
+      for (let x = startX; x < width; x += grid) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+      }
+      for (let y = startY; y < height; y += grid) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      }
+
+      for (const shape of shapes) {
+        const x = shape.x - cameraX, y = shape.y - cameraY;
+        if (x < -55 || x > width + 55 || y < -55 || y > height + 55) continue;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(shape.angle);
+        ctx.fillStyle = { square: "#f2c94c", triangle: "#eb5757", pentagon: "#9b51e0" }[shape.type];
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 4;
+        polygon(shape.type === "square" ? 4 : shape.type === "triangle" ? 3 : 5,
+          shape.size, shape.type === "square" ? Math.PI / 4 : -Math.PI / 2);
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+
+      for (const bullet of bullets) {
+        ctx.beginPath();
+        ctx.arc(bullet.x - cameraX, bullet.y - cameraY, bullet.radius, 0, Math.PI * 2);
+        ctx.fillStyle = bullet.faction === "enemy" ? "#e14b4b" : "#536b83";
+        ctx.fill();
+      }
+
+      for (const bot of bots) {
+        if (!bot.alive) continue;
+        const x = bot.x - cameraX, y = bot.y - cameraY;
+        drawTank(x, y, bot.radius, bot.angle, bot.color);
+        ctx.fillStyle = "#d6dce3";
+        ctx.fillRect(x - 20, y - bot.radius - 10, 40, 4);
+        ctx.fillStyle = "#e14b4b";
+        ctx.fillRect(x - 20, y - bot.radius - 10, 40 * bot.health / bot.maxHealth, 4);
+      }
+
+      for (const minion of minions) {
+        drawTank(minion.x - cameraX, minion.y - cameraY,
+          minion.radius, minion.angle, "#20a6b8");
+      }
+
+      if (player.alive) {
+        drawTank(width / 2, height / 2, player.radius, player.angle, "#4285c5");
+      }
+
+      const barW = 220;
+      ctx.fillStyle = "#dce3eb";
+      ctx.fillRect(width / 2 - barW / 2, height - 27, barW, 8);
+      ctx.fillStyle = "#55b887";
+      ctx.fillRect(width / 2 - barW / 2, height - 27,
+        barW * player.xp / player.nextXp, 8);
+
+      drawMinimap();
+    }
+
+    let last = performance.now();
+    function frame(now) {
+      const dt = Math.min((now - last) / 1000, 0.04);
+      last = now;
+      update(dt);
+      draw();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
